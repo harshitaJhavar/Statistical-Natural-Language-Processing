@@ -1,16 +1,19 @@
-#!/usr/bin/env python3
-#Exercise 2, Task 3
+#!usr/bin/env pytohn3
+#Exercise 5, Task 3
 #SNLP, Summer 2017
 
-from nltk import sent_tokenize, wordpunct_tokenize
+from collections import Counter
+from string import punctuation
 from collections import defaultdict
-import numpy as np # For working with logs
+from nltk import sent_tokenize, wordpunct_tokenize
+import numpy as np
 import matplotlib.pyplot as plt
 
-    
+
 def get_counts(text):
-    """Returns default dictionaries for unigrams and 
-       bigram counts, respectively
+    """Tokenizes text, returning default dictionaries 
+       for unigrams and bigram counts, respectively.
+       R(h) can later be easily calculated from this structure.
     """
     # Split into sentences
     sents = sent_tokenize(text)
@@ -31,145 +34,132 @@ def get_counts(text):
     for word1, word2 in bigrams:
         bigram_counts[word1][word2] += 1 # eg: word_N-1[word_N] : count
     return unigram_counts, bigram_counts
- 
 
-def get_prob_dicts(unigram_dict, bigram_dict, alpha=0.3):
-    """Given lists of unigrams and bigrams, and optionally
-       alpha value for Lidstone smoothing, returns default
-       dictinaries of log-probabilities for unigram and
-       bigram language models.
+
+def unigram_discounting(word, d=0.7):
+    """Returns P(w), applying absolute discounting for d > 0.
+       For lack of a separate vocab list, just use types from text
     """
-    # Number of types, aka size of vocab
-    V = len(unigram_dict) 
-    V += 1 # To account for <UNK> marker
-    
-    # Convert unigram counts to probabilities
-    unigram_total = sum(unigram_dict.values()) # Number of tokens
-    for word in unigram_dict:
-        prob = (unigram_dict[word] + alpha) / (unigram_total + alpha * V)
-        unigram_dict[word] = np.log(prob)
-    # Add probability mass reserved for unseen tokens
-    if alpha > 0:
-        unigram_dict["UNK"] = np.log(alpha / (unigram_total + alpha * V))
+    V = len(unigram_counts) # Full vocab 
+    n_plus = len(unigram_counts) # Vocab entries encountered in text
+    N = sum(unigram_counts.values()) # Number of tokens of vocab words seen in text 
+    alpha = d * n_plus / N
+    prob = alpha / V    
+    if word in unigram_counts:
+        # prob += (N(w) - d) / N
+        prob += (unigram_counts[word] - d) / N
+    return prob
+
+
+def get_Rh(hist):
+    """Count of all bigrams that satisfy N(w,h) > 0, aka
+       the number of bigrams that have 'hist' as the history
+    """
+    if hist in bigram_counts:
+        R_h = sum(bigram_counts[hist].values()) 
     else:
-        unigram_dict["UNK"] = float("-inf")
-        
-    # Convert bigram counts to probabilities
-    for word1 in bigram_dict:
-        word1_total = sum(bigram_dict[word1].values())
-        for word2 in bigram_dict[word1]:
-            prob = (bigram_dict[word1][word2] + alpha) / (word1_total + alpha * V)
-            bigram_dict[word1][word2] = np.log(prob)
-        # Add probability mass for unseen word with seen history, eg: P(<UNK>|the)
-        prob = alpha / (word1_total + alpha * V)
-        bigram_dict[word1]["UNK"] = np.log(prob)
-    # Add probability mass for unseen word with unseen history, eg: P(<UNK>|<UNK>)
-    # Rough way for handling this situation for now
-    if alpha > 0:
-        bigram_dict["UNK"] = np.log(1 / V)
+        R_h = 0
+    return R_h
+
+
+def bigram_discounting(word, hist, d=0.7):
+    """Returns P(w|h), applying absolute discounting for d > 0.
+       For unseen history words, falls back to unigram model.
+    """
+    if hist in bigram_counts:
+    # Proper bigram discounting
+        prob_w = unigram_discounting(word)
+        # Count of the history word
+        N_h = unigram_counts[hist] 
+        # Count of bigrams starting with the history word
+        R_h = get_Rh(hist)
+        alpha_h = d * R_h / N_h 
+        prob = alpha_h * prob_w
+        # If N(w,h) > 0
+        if word in bigram_counts[hist]:
+            N_wh = bigram_counts[hist][word]
+            prob += (N_wh - d) / N_h
     else:
-        bigram_dict["UNK"] = float("-inf")
-    return unigram_dict, bigram_dict
-    
+    # Fall back to unigram model
+        prob = unigram_discounting(word)
+    return prob
 
-def sanity_check(unigram_probs, bigram_probs):
-    """Given smoothed unigram and bigram models,
-       checks that probabilities sum to one."""
-    probs = list(unigram_probs.values())
-    uni_total = sum([np.exp(x) for x in probs])
-    print("\tUnigram probability sum:", uni_total)
 
-    word = 'the'
-    V = len(vocab)
-    bigram_words = len(bigram_probs[word])
-    # Number of words not encountered as a bigram with word
-    difference = V - bigram_words 
-    bi_total = sum([np.exp(bigram_probs[word][x]) for x in bigram_probs[word]])
-    bi_total += np.exp(bigram_probs[word]["UNK"]) * difference
-    print("\tBigram probability sum (for 'the'): ", bi_total)
-    # Round off minor float erros
-    if round(uni_total, 5) != 1 or round(bi_total, 5) != 1:
-        print("Warning, probabilities do not sum to one!")
-    
-
-def get_perplexity(unigram_model, bigram_model, text):
-    """Given a unigram and bigram model and a test test,
-       calculates the respective perplexities"""
-    # Get counts from test text
-    unigram_counts, bigram_counts = get_counts(text)
+def get_perplexity(text, d=0.7):
+    """Given a test text, calculates the perplexity.
+       Model from training text should already be computed
+       outside of the function and stored in global variables
+       named unigram_counts and bigram_counts.
+       """
+    # Get absolute counts of testing text
+    unigram_countsTEST, bigram_countsTEST = get_counts(text)
     # Get N values to transform absolute count into relative counts
-    unigram_N = sum(unigram_counts.values())
-    bigram_N = sum([sum(bigram_counts[word].values()) for word in bigram_counts if word != "UNK"])
-    
+    bigram_N = sum([sum(bigram_countsTEST[word].values()) for word in bigram_countsTEST])
     # Initialize perplexity value and increment
-    unigram_pp = 0
-    for word in unigram_counts:
-        count = unigram_counts[word]
-        if word in unigram_model:
-            log_prob = unigram_model[word]
-        else:
-            log_prob = unigram_model["UNK"]
-        unigram_pp += count * log_prob
-    unigram_pp = np.exp(-unigram_pp / unigram_N)
-    
-    # Same process but with bigrams
     bigram_pp = 0
-    for word1 in bigram_counts:
-        if word1 in bigram_model:
-            # For every word that follows a known word
-            for word2 in bigram_counts[word1]:
-                count = bigram_counts[word1][word2]
-                if word2 in bigram_model[word1]:
-                    log_prob = bigram_model[word1][word2]
-                else:
-                    log_prob = bigram_model[word1]["UNK"]
-                bigram_pp += count * log_prob
-        else: # Unknown word follwed by anything else
-            count = sum(bigram_counts[word1].values())
-            log_prob = bigram_model["UNK"]
-            bigram_pp += count * log_prob
+    for word1 in bigram_countsTEST:
+        for word2 in bigram_countsTEST[word1]:
+            # Probability based on model from training set
+            prob = bigram_discounting(word2, word1, d=d) 
+            # Note: Will return -inf for unseen words if d=0
+            prob = np.log(prob)
+            # Times the absolute frequency is seen in testing set
+            count = bigram_countsTEST[word1][word2]
+            bigram_pp += count * prob
     bigram_pp = np.exp(-bigram_pp / bigram_N)
-    return unigram_pp, bigram_pp
+    return bigram_pp
 
 
-if __name__ == "__main__":
-    training_filename = "../Materials/English1.txt"
-    test_filename = "../Materials/English2.txt"
+def fold(full_text, d=0.7, num_folds=5):
+    """Applies k-fold cross-validation over a text,
+       returning the average perplexity
+    """
+    all_pp = []
+    cutoff = int(len(full_text) / num_folds)
+    for i in range(num_folds):
+        testing = full_text[i*cutoff:(i+1)*cutoff] # Validation set
+        training = full_text[:i*cutoff] + full_text[(i+1)*cutoff:]
+        unigram_counts, bigram_counts = get_counts(training)
+        pp = get_perplexity(testing, d=d)
+        print("Fold", i+1, "perplexity:", pp)
+        all_pp += [pp]
+    avg_pp = sum(all_pp) / num_folds
+    print("Average:", avg_pp)
+    return avg_pp
 
-    with open(training_filename) as f:
-        training_text = f.read()
-    
-    # Check that smoothing is working
-    unigram_counts, bigram_counts = get_counts(training_text)
-    unigram_probs, bigram_probs = get_prob_dicts(unigram_counts, bigram_counts)
-    print("Sanity check for smoothing:")
-    sanity_check(unigram_probs, bigram_probs)
 
-    with open(test_filename) as f:
-        test_text = f.read()
-    print("\nEvaluating against", test_filename.split("/")[-1], "\n")
+def adjust_d(full_text, num_folds=5):
+    """Iteratively applied k-fold cross-validation
+       incrementing the d value by 0.1 from 0.0 to 1.0.
+    """
+    all_pp = []
+    for d in range(11):
+        d /= 10
+        print("\nd =", d)
+        pp = fold(full_text, d=d, num_folds=num_folds)
+        all_pp += [pp]
+    return all_pp
 
-    fifth = int(len(training_text) / 5)
-    stats = []
-    for i in range(1,6):
-        training_subset = training_text[:(fifth * i)]
-        percentage = i * 20
-        print("Training on {}% of {}".format(percentage, training_filename.split("/")[-1]))
-        # Get count dictionaries
-        unigram_counts, bigram_counts = get_counts(training_subset)
-        # Create probability dictionaries
-        unigram_probs, bigram_probs = get_prob_dicts(unigram_counts, bigram_counts)
-        # Calculate perplexity
-        unigram_pp, bigram_pp = get_perplexity(unigram_probs, bigram_probs, test_text)
-        print("\tUnigram perplexity:", unigram_pp)
-        print("\tBigram perplexity: ", bigram_pp, "\n")
-        stats += [(percentage, unigram_pp, bigram_pp)]
 
-    x = [x[0] for x in stats]
-    y = [x[1:] for x in stats]
-    plt.plot(x, y, 'o')
-    plt.title("Perplexity Patterns")
+def plot_pp(pp_list):
+    """Plots the resulting perplexity values of
+       adjusting the discounting parameter
+    """
+    # Note: Pyplot just skips values that are infinite
+    plt.plot(pp_list)
     plt.ylabel("Perplexity")
-    plt.xlabel("Percentage of training text used")
-    plt.legend(["Unigram", "Bigram"])
+    plt.xlabel("Discounting Parameter")
+    plt.xticks([x for x in range(11)], [x/10 for x in range(11)])
     plt.show()
+
+    
+if __name__ == "__main__":
+    with open("../materials_ex5/text.txt") as f:
+        text = f.read()
+    # Global variables reflecting counts from the TRAINING corpus
+    unigram_counts, bigram_counts = get_counts(text)
+    all_pp = adjust_d(text)
+    plot_pp(all_pp)
+    min_value = min(all_pp)
+    min_d = [i for i in range(len(all_pp)) if all_pp[i] == min_value]
+    print("Minimum perplexity at d =", min_d[0]/10)
